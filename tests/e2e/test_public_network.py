@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Callable
 from decimal import Decimal
@@ -140,6 +141,55 @@ def test_followers_size_paper_orders_by_the_contract(public_run: Run) -> None:
         account = public_run.follower_summaries[name]["account"]
         assert Decimal(account["position_qty"]) == position
         assert account["fills"] == fills
+
+
+def test_sep_3_19_a_late_joiner_backfills_the_chain_the_relay_holds(public_run: Run) -> None:
+    """The `late` follower (T2) started after the relay held 10 signals: its ledger holds every seq, the earlier ones
+    as history fetched on connect, the chain is the one the on-time follower saw, and the relay's bundle checked
+    against the late follower's head is complete."""
+    n = signals_sent(public_run)
+    rows = sorted(public_run.ledger("late").rows(), key=lambda r: r.seq or 0)
+    assert [r.seq for r in rows] == list(range(1, n + 1)), [
+        (r.seq, r.status, r.reason) for r in rows
+    ]
+    assert all(r.status in ("history", "accepted") for r in rows), [
+        r.reason for r in rows if r.status not in ("history", "accepted")
+    ]
+    history = [r for r in rows if r.status == "history"]
+    live = [r for r in rows if r.status == "accepted"]
+    assert len(history) >= 5 and len(live) >= 4, (
+        f"{len(history)} history, {len(live)} live: move the join"
+    )
+    assert all(r.source == "backfill" for r in history)
+    assert max(r.seq or 0 for r in history) < min(
+        r.seq or 0 for r in live
+    )  # history first, then live
+    on_time = {r.seq: r.ref for r in public_run.ledger("t0").rows()}
+    assert {r.seq: r.ref for r in rows} == on_time  # the same chain, no gap
+    assert rows[0].prev is None and all(b.prev == a.ref for a, b in itertools.pairwise(rows))
+    head = public_run.ledger("late").head(public_run.provider.pubkey, "ema-fast-1h")
+    assert head == (n, rows[-1].ref)
+    bundle = bundle_from_relay(public_run.relay.url, public_run.provider.pubkey, exported_at=0)
+    check = check_bundle(bundle, expected_heads={"ema-fast-1h": head})
+    assert check.complete and not check.gaps, check.problems + check.gaps
+    print(f"\nSEP-3.19 late joiner: {len(history)} history (backfilled), {len(live)} live, of {n}")
+
+
+def test_sep_3_20_the_late_joiner_never_traded_a_signal_created_before_it_joined(
+    public_run: Run,
+) -> None:
+    rows = public_run.ledger("late").rows()
+    history = [r for r in rows if r.status == "history"]
+    live = [r for r in rows if r.status == "accepted"]
+    assert history and all(not r.placed and not r.filled and r.qty is None for r in history)
+    assert max(r.created_ms or 0 for r in history) < min(r.created_ms or 0 for r in live)
+    assert any(r.placed for r in live), "live signals must still be executed"
+    summary = public_run.follower_summaries["late"]
+    assert summary["history"] == len(history)
+    assert summary["placed"] == sum(
+        r.placed for r in live
+    )  # every order the executor saw came from a live signal
+    assert summary["account"]["fills"] == sum(r.filled for r in live)
 
 
 def test_sep_3_39_an_unregistered_pubkey_cannot_publish(public_run: Run) -> None:

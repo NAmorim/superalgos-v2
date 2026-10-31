@@ -418,7 +418,7 @@ def test_my_signals_survive_a_corrupt_ledger(config: ApiConfig, world: World) ->
 
 
 @given(
-    status=st.sampled_from(["accepted", "rejected", "pending"]),
+    status=st.sampled_from(["accepted", "history", "rejected", "pending"]),
     placed=st.booleans(),
     queued=st.booleans(),
     reason=st.text(max_size=20),
@@ -432,7 +432,10 @@ def test_follower_outcome_is_executed_only_for_a_placed_accepted_signal(
     assert (outcome == "pending") is (
         status == "pending" or (status == "accepted" and queued and not placed)
     )
-    if status == "rejected":
+    assert (outcome == "history") is (
+        status == "history"
+    )  # SEP-3.20: history is never shown as executed
+    if status in ("rejected", "history"):
         assert why == reason
 
 

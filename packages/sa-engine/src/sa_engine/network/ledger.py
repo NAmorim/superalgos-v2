@@ -2,6 +2,10 @@
 
 SQLite (standard library), one row per signal event. The chain heads it keeps (last accepted seq and
 chain reference per provider and strategy) make chain-continuity checks survive a restart.
+
+``status`` is ``accepted`` (verified, handed to the executor), ``history`` (verified and in the chain, but created
+before the follower subscribed: recorded, never executed, SEP-3.20), ``rejected`` or ``pending``. Rows the
+follower fetched as history on connect have ``source = 'backfill'`` (SEP-3.19).
 """
 
 from __future__ import annotations
@@ -17,7 +21,20 @@ from pydantic import BaseModel, ConfigDict
 
 from sa_engine.network.executor import Execution
 
-Status = Literal["accepted", "rejected", "pending"]
+Status = Literal["accepted", "history", "rejected", "pending"]
+
+
+# Rows that move a chain head: verified signals, executed or history, and gap rejections (see ``Ledger.head``).
+_HEAD_SQL = (
+    "SELECT seq, ref FROM signals WHERE provider=? AND strategy_id=? AND ref IS NOT NULL"
+    " AND (status IN ('accepted', 'history') OR reason LIKE 'gap:%') ORDER BY seq DESC LIMIT 1"
+)
+_OLDEST_HEAD_SQL = (
+    "SELECT MIN(s.created_ms) AS at FROM signals s JOIN (SELECT strategy_id, MAX(seq) AS seq FROM signals"
+    " WHERE provider=? AND ref IS NOT NULL AND (status IN ('accepted', 'history') OR reason LIKE 'gap:%')"
+    " GROUP BY strategy_id) h ON s.strategy_id = h.strategy_id AND s.seq = h.seq WHERE s.provider=?"
+    " AND s.ref IS NOT NULL AND (s.status IN ('accepted', 'history') OR s.reason LIKE 'gap:%')"
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -195,12 +212,15 @@ class Ledger:
         return self._rows("SELECT * FROM signals WHERE ref=?", (ref,))
 
     def head(self, provider: str, strategy_id: str) -> tuple[int, str] | None:
-        """(seq, ref) where this chain stands: the newest accepted signal, or one rejected for a gap
+        """(seq, ref) where this chain stands: the newest accepted or history signal, or one rejected for a gap
         (a gap rejects the signal but still moves the head, so later signals verify against it)."""
         with self._lock:
-            row = self._db.execute(
-                "SELECT seq, ref FROM signals WHERE provider=? AND strategy_id=? AND ref IS NOT NULL"
-                " AND (status='accepted' OR reason LIKE 'gap:%') ORDER BY seq DESC LIMIT 1",
-                (provider, strategy_id),
-            ).fetchone()
+            row = self._db.execute(_HEAD_SQL, (provider, strategy_id)).fetchone()
         return None if row is None else (int(row["seq"]), str(row["ref"]))
+
+    def oldest_head_ms(self, provider: str) -> int | None:
+        """``created_ms`` of the oldest chain head this ledger holds for ``provider`` (over its strategies), or
+        ``None`` when it holds no chain of that provider: where a backfill starts (SEP-3.19)."""
+        with self._lock:
+            row = self._db.execute(_OLDEST_HEAD_SQL, (provider, provider)).fetchone()
+        return None if row is None or row["at"] is None else int(row["at"])

@@ -16,6 +16,13 @@ Checks, in order, for each signal (relayed or read from a file, SEP-3.29):
    it cannot undo a paper order already placed.
 
 A rejected signal is never executed. Everything, accepted or not, is in the ledger with its receive time.
+
+History (SEP-3.19, SEP-3.20): on every connect, before the live subscription starts, the follower fetches each
+followed provider's stored signals, commitments and attestations from its ledger's oldest chain head (all of them
+on a fresh ledger) up to the live subscription's ``since``, and runs them through the same checks in chain order,
+with the delegation judged at the event's ``created_at`` and no stale check. What passes is recorded with status
+``history`` and source ``backfill`` and moves the chain head, so the first live signal follows it without a gap.
+A signal created before the subscription is never executed, whichever route it arrives by.
 """
 
 from __future__ import annotations
@@ -128,7 +135,8 @@ class FollowerBot:
         self.authenticated = False
         self._proofs: dict[str, list[AnchorProof]] = {}
         self._commitments: dict[str, tuple[Commitment, str, str]] = {}  # digest -> (commitment, event id, provider)
-        self._waiting: dict[str, NostrEvent] = {}  # digest -> private signal waiting for its commitment
+        self._waiting: dict[str, tuple[NostrEvent, str]] = {}  # digest -> (private signal, source) awaiting commitment
+        self._live_from_s: int | None = None  # the live subscription's `since`: events created before it are history
         # chain (provider, strategy) -> seq -> verified signal that arrived ahead of its predecessors
         self._held: dict[tuple[str, str], dict[int, _Verified]] = {}
         self._timers: dict[tuple[str, str], asyncio.TimerHandle] = {}
@@ -167,8 +175,13 @@ class FollowerBot:
                 await self._publish_allocation(relay)
             await self._load_revocations(relay)
             await self._load_rules(relay)
+            await self.backfill(relay, since)
             filters = [
-                {"kinds": [SIGNAL_KIND, COMMITMENT_KIND, ANCHOR_KIND], "authors": self.providers, "since": since},
+                {
+                    "kinds": [SIGNAL_KIND, COMMITMENT_KIND, ANCHOR_KIND],
+                    "authors": self.providers,
+                    "since": since - self._release_lookback_s(),
+                },
                 {"kinds": [REVOCATION_KIND], "since": since},  # anyone may publish a revocation
             ]
             consumer = asyncio.create_task(self._consume(relay, filters))
@@ -249,6 +262,47 @@ class FollowerBot:
             except PowerError as exc:
                 raise FollowerError(f"rule set of provider {provider[:12]}.. is invalid: {exc}") from exc
 
+    def _release_lookback_s(self) -> int:
+        """The longest tier delay of the followed providers. A relay applies ``since`` when it releases an event to
+        a tier, so a signal created just before the subscription and released after it would be in neither the
+        backfill nor a live REQ starting at ``since``: the live REQ reaches back this far, and what it brings from
+        before ``since`` is recorded as history (SEP-3.19, SEP-3.20)."""
+        longest = 0.0
+        for rules in self.rules.values():
+            if rules.provider in self.providers and rules.tiers:
+                longest = max(longest, max(t.delay_fraction for t in rules.tiers) * rules.timeframe)
+        return int(longest) + 5
+
+    # ------------------------------------------------------------------ history
+    async def backfill(self, relay: RelayClient, until_s: int) -> int:
+        """Record what each followed provider published before ``until_s`` and this ledger lacks, as history
+        (SEP-3.19); none of it is executed (SEP-3.20). ``until_s`` is the ``since`` of the live subscription that
+        follows: from here on, anything created before it is history whichever route it arrives by. Returns how many
+        history rows were added."""
+        self._live_from_s = until_s
+        filters: list[dict[str, object]] = []
+        for provider in self.providers:
+            flt: dict[str, object] = {"kinds": [SIGNAL_KIND, COMMITMENT_KIND, ANCHOR_KIND], "authors": [provider]}
+            head_ms = self.ledger.oldest_head_ms(provider)
+            if head_ms is not None:
+                flt["since"] = head_ms // 1000
+            filters.append(flt)
+        events = [ev for ev in await relay.query(filters, timeout=30.0) if ev.created_at < until_s]
+        before = len(self.ledger.rows("history"))
+        order = {COMMITMENT_KIND: 0, SIGNAL_KIND: 1, ANCHOR_KIND: 2}  # a private signal needs its commitment first
+        for ev in sorted(events, key=lambda e: (order.get(e.kind, 3), e.created_at, e.id)):
+            try:
+                await self.ingest(ev, "backfill")
+            except Exception:  # one bad stored event must not stop the backfill
+                log.exception("backfill of %s failed", ev.id[:12])
+        async with self._lock:
+            for key in list(self._held):
+                await self._flush(key)
+        added = len(self.ledger.rows("history")) - before
+        if added:
+            log.info("recorded %d signals created before this subscription as history (not executed)", added)
+        return added
+
     # ------------------------------------------------------------------ ingest
     async def ingest(self, ev: NostrEvent, source: str = "relay") -> LedgerRow | None:
         now_ms = int(self.clock() * 1000)
@@ -312,30 +366,33 @@ class FollowerBot:
         return row
 
     async def _on_commitment(self, ev: NostrEvent, now_ms: int, source: str) -> LedgerRow | None:
-        if source == "relay" and ev.pubkey not in self.providers:
+        if source != "file" and ev.pubkey not in self.providers:
             return None
+        at = ev.created_at if source == "backfill" else now_ms // 1000
         try:
-            commitment, _addr = verify_commitment_event(ev, now_ms // 1000, self._revs())
+            commitment, _addr = verify_commitment_event(ev, at, self._revs())
         except SignalError as exc:
             log.warning("ignoring commitment %s: %s", ev.id[:12], exc)
             return None
         self._commitments[commitment.digest] = (commitment, ev.id, ev.pubkey)
         waiting = self._waiting.pop(commitment.digest, None)
         if waiting is not None:
-            return await self._on_signal(waiting, now_ms, "relay")
+            return await self._on_signal(waiting[0], now_ms, waiting[1])
         return None
 
     async def _on_signal(self, ev: NostrEvent, now_ms: int, source: str) -> LedgerRow | None:
         provider = ev.pubkey
-        if source == "relay" and provider not in self.providers:
+        if source != "file" and provider not in self.providers:
             return None
+        if source == "relay" and self._live_from_s is not None and ev.created_at < self._live_from_s:
+            source = "backfill"  # created before the subscription: history, whatever route it came by (SEP-3.20)
         known = self.ledger.get(ev.id)
         if known is not None and known.status != "pending":
             return known  # redelivery
         rules = self.rules.get(provider)
         private = rules.private is not None if rules is not None else bool(ev.tag_values("p"))
         expected = rules.sa_address if rules is not None else None
-        at = now_ms // 1000
+        at = ev.created_at if source == "backfill" else now_ms // 1000
         revs = self._revs()
         try:
             signed = (
@@ -353,7 +410,7 @@ class FollowerBot:
         limit = (
             self.max_age_s if self.max_age_s is not None else 3 * (rules.timeframe if rules else signal.timeframe) + 30
         )
-        if age_s > limit:
+        if age_s > limit and source != "backfill":  # history is recorded, never executed: age does not matter
             return self._reject(
                 ev, source, now_ms, f"stale: signal is {age_s:.0f}s old, limit {limit:.0f}s", signal=signal
             )
@@ -381,7 +438,7 @@ class FollowerBot:
             digest = commitment_digest(signal.model_dump_json())
             found = self._commitments.get(digest)
             if found is None:
-                self._waiting[digest] = ev
+                self._waiting[digest] = (ev, source)
                 self.ledger.record(
                     event_id=ev.id,
                     provider=provider,
@@ -422,8 +479,8 @@ class FollowerBot:
             return row
 
     def _must_wait(self, key: tuple[str, str], v: _Verified) -> bool:
-        if self.reorder_wait_s <= 0 or self.allow_gaps or v.source == "file":
-            return False
+        if v.source != "backfill" and (self.reorder_wait_s <= 0 or self.allow_gaps or v.source == "file"):
+            return False  # history always waits: the backfill puts it in chain order before judging gaps
         head = self.ledger.head(*key)
         return v.signal.seq > 1 if head is None else v.signal.seq > head[0] + 1
 
@@ -434,7 +491,7 @@ class FollowerBot:
             reason=f"out of order: waiting up to {self.reorder_wait_s:g}s for the signals before seq {v.signal.seq}",
             strategy_id=v.signal.strategy_id, seq=v.signal.seq, prev=v.signal.prev, created_ms=v.signal.created_ms,
         )  # fmt: skip
-        if key not in self._timers:
+        if key not in self._timers and v.source != "backfill":  # the backfill flushes its own when it is done
             self._timers[key] = asyncio.get_running_loop().call_later(self.reorder_wait_s, self._expire_soon, key)
         row = self.ledger.get(v.ev.id)
         assert row is not None
@@ -463,10 +520,16 @@ class FollowerBot:
     async def _expire(self, key: tuple[str, str]) -> None:
         """The wait is over: whatever is still held is processed in seq order (a gap is then judged as a gap)."""
         async with self._lock:
-            self._timers.pop(key, None)
-            held = self._held.pop(key, {})
-            for seq in sorted(held):
-                await self._execute(held[seq])
+            await self._flush(key)
+
+    async def _flush(self, key: tuple[str, str]) -> None:
+        """Process everything held for ``key`` in seq order. The caller holds the lock."""
+        timer = self._timers.pop(key, None)
+        if timer is not None:
+            timer.cancel()
+        held = self._held.pop(key, {})
+        for seq in sorted(held):
+            await self._execute(held[seq])
 
     async def _execute(self, v: _Verified) -> LedgerRow:
         ev, signal, ref, source = v.ev, v.signal, v.ref, v.source
@@ -483,6 +546,18 @@ class FollowerBot:
             return self._reject(
                 ev, source, received_ms, verdict[1], signal=signal, ref=ref if verdict[1].startswith("gap:") else None
             )
+        if source == "backfill":  # SEP-3.20: history moves the chain head and is never sent to the executor
+            note = "history: created before this follower subscribed; recorded, not executed"
+            self.ledger.record(
+                event_id=ev.id, provider=provider, source=source, received_ms=received_ms, status="history",
+                reason=f"{note} ({verdict[1]})" if verdict[1] else note, strategy_id=signal.strategy_id,
+                seq=signal.seq, ref=ref, prev=signal.prev, created_ms=signal.created_ms,
+                signal_json=signal.model_dump_json(),
+            )  # fmt: skip
+            self._anchor_check(ref)
+            row = self.ledger.get(ev.id)
+            assert row is not None
+            return row
         try:
             intent = OrderIntent(
                 instrument=signal.instrument,
@@ -561,6 +636,7 @@ class FollowerBot:
         return {
             "received": len(rows),
             "accepted": sum(r.status == "accepted" for r in rows),
+            "history": sum(r.status == "history" for r in rows),
             "rejected": sum(r.status == "rejected" for r in rows),
             "pending": sum(r.status == "pending" for r in rows),
             "placed": sum(r.placed for r in rows),

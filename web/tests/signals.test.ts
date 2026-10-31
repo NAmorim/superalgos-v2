@@ -26,14 +26,15 @@ describe("follower outcome labels", () => {
       "Rejected: gap: seq 6 does not follow 4",
     );
     expect(outcomeLabel("pending", "")).toBe("Pending");
+    expect(outcomeLabel("history", "recorded, not executed")).toBe("History: recorded, not executed");
   });
   test("the reason is always shown, and the label starts with the outcome", () => {
-    const outcomes: FollowerOutcome[] = ["executed", "rejected", "pending"];
+    const outcomes: FollowerOutcome[] = ["executed", "rejected", "pending", "history"];
     fc.assert(
       fc.property(fc.constantFrom(...outcomes), fc.string({ minLength: 1 }), (o, reason) => {
         const label = outcomeLabel(o, reason);
         expect(label.endsWith(reason)).toBe(true);
-        expect(label.toLowerCase().startsWith(o === "pending" ? "pending" : o)).toBe(true);
+        expect(label.toLowerCase().startsWith(o)).toBe(true);
       }),
     );
   });

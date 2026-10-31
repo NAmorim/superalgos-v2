@@ -134,7 +134,8 @@ export interface DevSignal extends Signal {
   release: Release[];
 }
 
-export type FollowerOutcome = "executed" | "rejected" | "pending";
+/** "history": verified, created before this follower subscribed; recorded, never traded (SEP-3.20). */
+export type FollowerOutcome = "executed" | "rejected" | "pending" | "history";
 
 /** GET /api/me/signals: one row of the viewer's own follower ledger. */
 export interface FollowerSignal {

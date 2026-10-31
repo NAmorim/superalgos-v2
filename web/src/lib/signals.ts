@@ -13,10 +13,16 @@ export function signalStatusLabel(status: SignalStatus): string {
   }
 }
 
-/** The follower's result for a signal: executed, or rejected with the recorded reason. */
+const OUTCOME_HEAD: Record<FollowerOutcome, string> = {
+  executed: "Executed",
+  rejected: "Rejected",
+  pending: "Pending",
+  history: "History",
+};
+
+/** The follower's result for a signal: executed, rejected, pending or history, with the recorded reason. */
 export function outcomeLabel(outcome: FollowerOutcome, reason: string): string {
-  const head =
-    outcome === "executed" ? "Executed" : outcome === "rejected" ? "Rejected" : "Pending";
+  const head = OUTCOME_HEAD[outcome];
   return reason ? `${head}: ${reason}` : head;
 }
 
