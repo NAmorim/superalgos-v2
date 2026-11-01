@@ -13,11 +13,14 @@ import subprocess
 import sys
 import textwrap
 import time
-from datetime import date
+from calendar import monthrange
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import sa_cli.demo_plan as plan
 from cli_support import ThreadedRelay
@@ -30,15 +33,48 @@ from sa_engine.network.replay import ReplaySpec
 # ---------------------------------------------------------------- plan
 
 
-def test_default_window_is_the_last_days_of_the_latest_complete_month() -> None:
-    assert plan.latest_complete_month(date(2026, 10, 13)) == date(2026, 9, 1)
-    assert plan.latest_complete_month(date(2026, 1, 2)) == date(2025, 12, 1)
+def test_default_window_is_the_last_days_of_the_latest_published_month() -> None:
+    assert plan.latest_published_month(date(2026, 10, 13)) == date(2026, 9, 1)
     w = plan.pick_window(date(2026, 10, 13), 2)
     assert (w.replay_start, w.replay_end) == ("2026-09-29", "2026-10-01")
     assert (w.backtest_start, w.backtest_end) == (
         "2026-09-01",
         "2026-09-15",
     )  # two weeks, before the replay
+
+
+@pytest.mark.parametrize(
+    ("today", "month"),
+    [
+        (
+            date(2026, 11, 1),
+            date(2026, 9, 1),
+        ),  # October ended yesterday: Binance has not published it yet
+        (date(2026, 11, 7), date(2026, 9, 1)),
+        (date(2026, 11, 8), date(2026, 10, 1)),  # a week after October ended
+        (date(2026, 1, 2), date(2025, 11, 1)),  # across a year
+        (date(2026, 3, 8), date(2026, 2, 1)),  # after a 28-day February
+    ],
+)
+def test_sep_1_20_the_default_month_is_one_binance_has_published(today: date, month: date) -> None:
+    assert plan.latest_published_month(today) == month
+    assert plan.pick_window(today, 2).backtest_start == month.isoformat()
+
+
+@settings(max_examples=300)
+@given(today=st.dates(min_value=date(2018, 1, 1), max_value=date(2100, 12, 31)))
+def test_sep_1_20_property_the_default_month_ended_a_week_ago_and_is_the_newest_such(
+    today: date,
+) -> None:
+    month = plan.latest_published_month(today)
+    n = monthrange(month.year, month.month)[1]
+    ended = month + timedelta(days=n)  # first day after the month
+    assert month.day == 1
+    assert (today - ended).days >= plan.PUBLISH_LAG_DAYS  # it ended at least the lag before today
+    nxt_n = monthrange(ended.year, ended.month)[1]
+    assert (
+        today - (ended + timedelta(days=nxt_n))
+    ).days < plan.PUBLISH_LAG_DAYS  # the next one has not
 
 
 def test_window_with_an_explicit_month_and_a_long_replay() -> None:
@@ -746,10 +782,17 @@ def exec_calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     return calls
 
 
+def no_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests never fetch candles (SEP-1.20): the archive a date picks may not exist yet, and it is 40 MB."""
+    monkeypatch.setattr(cmd_demo.Demo, "warm_data", lambda self: None)
+
+
 def setup_role(
     tmp_path: Path, relay: ThreadedRelay, monkeypatch: pytest.MonkeyPatch, **kw: Any
 ) -> cmd_demo.Demo:
-    """Run the setup role against the fake relay; backtests are stubbed (they need market data)."""
+    """Run the setup role against the fake relay; backtests and the candle download are stubbed (they need market
+    data from the network; `test_warm_data_prepares_the_month_once_and_explains_a_failure` covers the download)."""
+    no_download(monkeypatch)
 
     def fake_run(cmd: list[str], **k: Any) -> subprocess.CompletedProcess[str]:
         Path(cmd[cmd.index("-o") + 1]).write_text("{}")
@@ -798,6 +841,7 @@ def test_the_setup_role_prepares_everything_the_other_containers_read(
 def test_a_failed_backtest_stops_the_setup(
     tmp_path: Path, relay: ThreadedRelay, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    no_download(monkeypatch)
     monkeypatch.setattr(
         "sa_cli.cmd_demo.subprocess.run",
         lambda cmd, **k: subprocess.CompletedProcess(cmd, 1, "", "no data"),
@@ -939,8 +983,12 @@ def test_warm_data_prepares_the_month_once_and_explains_a_failure(
         raise DataError("GET failed: no network")
 
     monkeypatch.setattr(catalog, "ensure_catalog", broken)
-    with pytest.raises(CliError, match="cannot prepare the candles: GET failed: no network"):
+    with pytest.raises(CliError, match="cannot prepare the candles: GET failed: no network") as err:
         d.warm_data()
+    assert (
+        "not published the 2026-09 archive yet, pick an earlier month: --month 2026-08-01"
+        in str(err.value)
+    )
 
 
 def test_the_live_stack_leaves_dev_views_off() -> None:

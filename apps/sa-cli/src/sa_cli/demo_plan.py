@@ -34,6 +34,8 @@ FOLLOWERS: tuple[tuple[str, int], ...] = (("whale", 1_000_000), ("mid", 20_000),
 ATLAS_STRATEGY, FOX_STRATEGY = "atlas-ema-1h", "fox-ema-1h"
 PRIVATE_MIN_POWER = 10_000
 LABELS = {ATLAS: "Atlas EMA (public)", FOX: "Fox EMA (private)"}
+# Binance publishes a month's archive some days after the month ends; until then its URLs are 404 (SEP-1.20).
+PUBLISH_LAG_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -46,21 +48,26 @@ class Window:
     replay_end: str
 
 
-def latest_complete_month(today: date) -> date:
-    """First day of the most recent calendar month that has ended."""
-    first = today.replace(day=1)
-    return (first - timedelta(days=1)).replace(day=1)
+def previous_month(day: date) -> date:
+    """First day of the month before the one ``day`` falls in."""
+    return (day.replace(day=1) - timedelta(days=1)).replace(day=1)
+
+
+def latest_published_month(today: date) -> date:
+    """First day of the most recent calendar month that ended at least ``PUBLISH_LAG_DAYS`` days before ``today``:
+    the newest monthly archive the demo can count on Binance having published (SEP-1.20)."""
+    return previous_month(today - timedelta(days=PUBLISH_LAG_DAYS))
 
 
 def pick_window(today: date, days: int, month_start: str | None = None) -> Window:
     """The last ``days`` days of a month are replayed; the days before them (up to 14) are backtested.
 
-    Default month: the latest complete one (Binance publishes monthly archives after the month ends).
+    Default month: the latest one Binance has published (``latest_published_month``).
     """
     if days < 1:
         raise CliError(f"--days {days} must be at least 1; a replay needs a day of candles")
     try:
-        first = date.fromisoformat(month_start) if month_start else latest_complete_month(today)
+        first = date.fromisoformat(month_start) if month_start else latest_published_month(today)
     except ValueError as exc:
         raise CliError(f"--month {month_start!r} must look like 2026-09-01") from exc
     first = first.replace(day=1)
