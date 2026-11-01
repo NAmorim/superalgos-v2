@@ -225,12 +225,15 @@ def signal_status(anchored_ms: int | None) -> Literal["out", "waiting_for_time_s
 
 def follower_outcome(
     status: str, placed: bool, queued: bool, reason: str, exec_reason: str
-) -> tuple[Literal["executed", "rejected", "pending"], str]:
+) -> tuple[Literal["executed", "rejected", "pending", "history"], str]:
     """The follower's ledger row as the follower sees it: executed (an order was placed), rejected (failed a check, or
-    accepted but not placeable, with the reason the follower recorded), or still pending (not decided yet, or queued
-    for the exchange and waiting for its event)."""
+    accepted but not placeable, with the reason the follower recorded), history (verified, created before the follower
+    subscribed: recorded, never traded, SEP-3.20), or still pending (not decided yet, or queued for the exchange and
+    waiting for its event)."""
     if status == "rejected":
         return "rejected", reason
+    if status == "history":
+        return "history", reason
     if status == "accepted":
         if placed:
             return "executed", exec_reason

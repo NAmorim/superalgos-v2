@@ -32,9 +32,9 @@ SEPs change by pull request, in the same pull request as the code they describe.
 | SEP | Title | Status | Criteria done/total |
 |---|---|---|---|
 | [0](sep-0000.md) | Project scope and principles | Accepted | n/a |
-| [1](sep-0001.md) | Cross-cutting | Accepted | 9/19 |
+| [1](sep-0001.md) | Cross-cutting | Accepted | 10/20 |
 | [2](sep-0002.md) | SA identity | Accepted | 4/7 |
-| [3](sep-0003.md) | Verifiable signals | Accepted | 38/46 |
+| [3](sep-0003.md) | Verifiable signals | Accepted | 41/46 |
 | [4](sep-0004.md) | Strategy authoring and backtest | Accepted | 3/7 |
 | [5](sep-0005.md) | Visual designer | Implemented | 17/17 |
 | [6](sep-0006.md) | More markets | Draft | 0/4 |

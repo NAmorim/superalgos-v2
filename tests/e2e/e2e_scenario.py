@@ -15,6 +15,7 @@ from typing import Any
 
 from e2e_net import TIMINGS, Proc, free_port, sa, spawn, spawn_sa, wait_for
 from sa_core.keys import DeviceKey
+from sa_core.models import SIGNAL_KIND
 from sa_engine.network.ledger import Ledger
 from sa_engine.network.replay import ReplaySpec
 
@@ -49,6 +50,7 @@ class FollowerSpec:
     name: str
     tokens: int
     allocate: bool = True
+    join_after: int = 0  # start once the relay holds this many of the provider's signals (a late joiner, SEP-3.19)
 
 
 @dataclass
@@ -226,7 +228,8 @@ def run_network(
         procs: dict[str, Proc] = {}
         ledgers: dict[str, Path] = {}
         logs: dict[str, Path] = {}
-        for actor in actors:
+
+        def start(actor: Actor) -> None:
             ledgers[actor.name] = workdir / f"{actor.name}.sqlite"
             logs[actor.name] = workdir / f"{actor.name}.log"
             procs[actor.name] = spawn_sa(
@@ -234,12 +237,20 @@ def run_network(
                 "--ledger", ledgers[actor.name], "--ready-file", workdir / f"{actor.name}.ready", "--tsa-config", tsa_config,
                 "--data-dir", data_dir, home=actor.home, log=logs[actor.name],
             )  # fmt: skip
-        for actor in actors:
+
+        def ready(actor: Actor) -> None:
             ready_file, proc = workdir / f"{actor.name}.ready", procs[actor.name]
             wait_ready(actor.name, ready_file, proc)
             assert ready_file.exists(), (
                 f"{actor.name} exited before it was ready:\n{proc.output()[-3000:]}"
             )
+
+        pairs = list(zip(followers, actors, strict=True))
+        on_time = [a for f, a in pairs if f.join_after == 0]
+        for actor in on_time:
+            start(actor)
+        for actor in on_time:
+            ready(actor)
         TIMINGS[f"{label}: followers ready (process start to subscribed)"] = (
             time.time() - t_followers
         )
@@ -247,6 +258,15 @@ def run_network(
         assert first_signal_in > 0, (
             f"followers were ready {-first_signal_in:.1f} s after the first signal: raise lead"
         )
+        late = sorted(((f, a) for f, a in pairs if f.join_after), key=lambda fa: fa[0].join_after)
+        for spec, actor in late:
+
+            def published(n: int = spec.join_after) -> bool:
+                return len(state_signals(state)) >= n or prov.popen.poll() is not None
+
+            wait_for(published, 300, f"{spec.join_after} signals before {actor.name} joins")
+            start(actor)
+            ready(actor)
         code = prov.wait(900)
         TIMINGS[f"{label}: provider run (backtest, lead, replay, last TSA batch)"] = (
             time.time() - t_run
@@ -267,6 +287,14 @@ def run_network(
         workdir, relay, provider, state, spec_path, bundle, actors, ledgers, last_json_line(prov.output()), summaries, logs,
         speed, window,
     )  # fmt: skip
+
+
+def state_signals(state: Path) -> list[dict[str, Any]]:
+    """The signal events in the provider's journal (each is written just before it is sent)."""
+    path = state / "events.jsonl"
+    lines = path.read_text().splitlines() if path.exists() else []
+    events = [json.loads(line)["event"] for line in lines if line.strip()]
+    return [ev for ev in events if ev["kind"] == SIGNAL_KIND]
 
 
 def wait_ready(name: str, ready_file: Path, proc: Proc) -> None:

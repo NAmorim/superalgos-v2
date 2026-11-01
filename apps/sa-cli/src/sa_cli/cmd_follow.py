@@ -109,7 +109,7 @@ def _report_key(args: argparse.Namespace) -> str:
 
 def _row_line(row: LedgerRow) -> str:
     base = f"{row.event_id[:12]} seq {row.seq}: {row.status}"
-    if row.status == "rejected":
+    if row.status in ("rejected", "history"):
         return f"{base}: {row.reason}"
     fill = (
         f", {row.qty} @ {row.price}"

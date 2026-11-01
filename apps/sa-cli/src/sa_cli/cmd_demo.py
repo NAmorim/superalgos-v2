@@ -382,7 +382,11 @@ class Demo:
         try:
             ensure_catalog(plan.INSTRUMENT.partition(":")[2], first, end, self.data_dir)
         except DataError as exc:
-            raise CliError(f"cannot prepare the candles: {exc}") from exc
+            earlier = plan.previous_month(first).isoformat()
+            raise CliError(
+                f"cannot prepare the candles: {exc}\n"
+                f"If Binance has not published the {first:%Y-%m} archive yet, pick an earlier month: --month {earlier}"
+            ) from exc
 
     def backtest_argv(self, strategy: str) -> list[str]:
         w = self.window
@@ -717,7 +721,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--month",
         metavar="YYYY-MM-01",
-        help="month of the Binance archive to use (default: the latest complete one)",
+        help="month of the Binance archive to use (default: the latest one ended a week or more ago, which Binance has published)",
     )
     p.add_argument(
         "--lead",

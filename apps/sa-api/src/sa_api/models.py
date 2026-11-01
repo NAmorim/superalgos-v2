@@ -123,7 +123,7 @@ class FollowerSignal(_Out):
     created_ms: int | None
     tier: int | None
     delay_ms: int | None
-    outcome: Literal["executed", "rejected", "pending"]
+    outcome: Literal["executed", "rejected", "pending", "history"]
     reason: str
     instrument: str | None
     side: Literal["buy", "sell"] | None

@@ -64,10 +64,14 @@ def tsa_config(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
 def public_run(
     relay_binary: Path, tsa_config: Path, data_dir: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> Iterator[Run]:
-    """A week of real BTCUSDT 1m data replayed fast by one provider; followers at T0, T2 and zero power."""
+    """A week of real BTCUSDT 1m data replayed fast by one provider; followers at T0, T2 and zero power, and a T2
+    follower that joins after the first 10 signals (SEP-3.19, SEP-3.20)."""
     run = run_network(
         tmp_path_factory.mktemp("public"), relay_binary, label="public", speed=SPEED, window=WEEK, tsa_config=tsa_config, data_dir=data_dir,
-        followers=[FollowerSpec("t0", 1_000_000), FollowerSpec("t2", 20_000), FollowerSpec("zero", 0, allocate=False)],
+        followers=[
+            FollowerSpec("t0", 1_000_000), FollowerSpec("t2", 20_000), FollowerSpec("zero", 0, allocate=False),
+            FollowerSpec("late", 20_000, join_after=10),
+        ],
     )  # fmt: skip
     try:
         yield run
