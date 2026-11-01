@@ -319,6 +319,27 @@ def test_my_signals_come_from_the_followers_own_ledger_with_tier_delay_and_outco
         assert c.get("/api/me/signals?limit=0").status_code == 422
 
 
+def test_sep_3_20_history_rows_show_as_history_never_as_executed(
+    config: ApiConfig, world: World
+) -> None:
+    pk = world.pub.pubkey
+    note = "history: created before this follower subscribed; recorded, not executed"
+    rows: list[dict[str, Any]] = [
+        {"event_id": "h1", "provider": pk, "received_ms": 1_000, "ref": "h1", "seq": 1, "created_ms": 900,
+         "signal_json": sample_signal(1), "status": "history", "reason": note},
+        {"event_id": "e2", "provider": pk, "received_ms": 2_000, "ref": "e2", "seq": 2, "created_ms": 1_900,
+         "signal_json": sample_signal(2), "executed": True, "exec_reason": "working order"},
+    ]  # fmt: skip
+    with follower_client(config, world, rows) as c:
+        by_id = {g["id"]: g for g in get(c, "/api/me/signals")}
+        assert (by_id["h1"]["outcome"], by_id["h1"]["reason"], by_id["h1"]["seq"]) == (
+            "history",
+            note,
+            1,
+        )
+        assert by_id["e2"]["outcome"] == "executed"
+
+
 def test_my_signals_list_no_other_follower_and_are_empty_for_another_wallet(
     config: ApiConfig, world: World
 ) -> None:

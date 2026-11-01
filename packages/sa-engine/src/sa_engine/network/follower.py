@@ -22,7 +22,8 @@ followed provider's stored signals, commitments and attestations from its ledger
 on a fresh ledger) up to the live subscription's ``since``, and runs them through the same checks in chain order,
 with the delegation judged at the event's ``created_at`` and no stale check. What passes is recorded with status
 ``history`` and source ``backfill`` and moves the chain head, so the first live signal follows it without a gap.
-A signal created before the subscription is never executed, whichever route it arrives by.
+A signal created before the subscription is never executed, whichever route it arrives by. History from before
+the lowest seq a ledger tracks of a chain (a ledger that started mid-chain) is skipped, not recorded.
 """
 
 from __future__ import annotations
@@ -403,6 +404,13 @@ class FollowerBot:
         except SignalError as exc:
             return self._reject(ev, source, now_ms, f"verification failed: {exc}")
         signal = signed.signal
+        if source == "backfill":
+            first = self.ledger.first_seq(provider, signal.strategy_id)
+            if first is not None and signal.seq < first:
+                # History from before this ledger's baseline (a ledger that started mid-chain): nothing to check
+                # it against, and no replay or fork either, so it is left out rather than recorded as rejected.
+                log.debug("skipping %s seq %d: before this ledger's baseline seq %d", ev.id[:12], signal.seq, first)
+                return None
         if rules is None and source != "file":
             return self._reject(ev, source, now_ms, "no rule set known for this provider", signal=signal)
 

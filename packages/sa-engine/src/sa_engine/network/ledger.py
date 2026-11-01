@@ -29,6 +29,10 @@ _HEAD_SQL = (
     "SELECT seq, ref FROM signals WHERE provider=? AND strategy_id=? AND ref IS NOT NULL"
     " AND (status IN ('accepted', 'history') OR reason LIKE 'gap:%') ORDER BY seq DESC LIMIT 1"
 )
+_FIRST_SEQ_SQL = (
+    "SELECT MIN(seq) AS seq FROM signals WHERE provider=? AND strategy_id=? AND ref IS NOT NULL"
+    " AND (status IN ('accepted', 'history') OR reason LIKE 'gap:%')"
+)
 _OLDEST_HEAD_SQL = (
     "SELECT MIN(s.created_ms) AS at FROM signals s JOIN (SELECT strategy_id, MAX(seq) AS seq FROM signals"
     " WHERE provider=? AND ref IS NOT NULL AND (status IN ('accepted', 'history') OR reason LIKE 'gap:%')"
@@ -217,6 +221,12 @@ class Ledger:
         with self._lock:
             row = self._db.execute(_HEAD_SQL, (provider, strategy_id)).fetchone()
         return None if row is None else (int(row["seq"]), str(row["ref"]))
+
+    def first_seq(self, provider: str, strategy_id: str) -> int | None:
+        """The lowest seq this ledger tracks of a chain (its baseline), or ``None`` for a chain it does not hold."""
+        with self._lock:
+            row = self._db.execute(_FIRST_SEQ_SQL, (provider, strategy_id)).fetchone()
+        return None if row is None or row["seq"] is None else int(row["seq"])
 
     def oldest_head_ms(self, provider: str) -> int | None:
         """``created_ms`` of the oldest chain head this ledger holds for ``provider`` (over its strategies), or

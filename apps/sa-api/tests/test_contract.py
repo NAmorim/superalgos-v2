@@ -161,7 +161,7 @@ def check_units(endpoint: str, value: object) -> None:
             assert all(isinstance(r["observed"], bool) for r in item["release"])
         elif endpoint == "GET /api/me/signals":
             assert item["received_ms"] > EPOCH_MS
-            assert item["outcome"] in ("executed", "rejected", "pending")
+            assert item["outcome"] in ("executed", "rejected", "pending", "history")
             assert item["delay_ms"] is None or item["delay_ms"] >= 0
             assert item["side"] in (None, "buy", "sell")
         elif endpoint in ("GET /api/backtests", "GET /api/backtests/{id}"):

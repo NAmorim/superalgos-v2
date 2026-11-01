@@ -318,3 +318,26 @@ async def test_sep_3_19_a_signal_released_to_this_tier_after_the_join_is_history
     late = bot.ledger.get(events[3].id)
     assert late and late.status == "history" and not late.placed
     assert spy.refs == [live.id]
+
+
+async def test_sep_3_19_history_before_a_ledgers_baseline_is_skipped_not_called_a_fork(tmp_path: Path) -> None:
+    """A ledger that started mid-chain (before backfill existed) is not filled below its baseline, and the earlier
+    signals the live REQ's reach-back brings are not recorded as replays or forks; a real fork still is."""
+    p = Identity()
+    events = chain(p, 7)
+    old, _ = spy_bot(tmp_path, p)
+    for ev in events[4:6]:  # baseline at seq 5
+        await old.ingest(ev)
+    old.ledger.close()
+    bot, spy = spy_bot(tmp_path, p)
+    await bot.backfill(_Store(events), int(NOW) + 1)  # type: ignore[arg-type]
+    for ev in events[:4]:
+        assert await bot.ingest(ev) is None
+    statuses = {r.seq: r.status for r in bot.ledger.rows()}
+    assert statuses == {5: "accepted", 6: "accepted", 7: "history"}
+    fork = build_signal_event(
+        p.device, signal(p, 6, events[4].id, at_ms=events[5].created_at * 1000 + 1, size_fraction=0.9), p.delegation
+    )
+    row = await bot.ingest(fork)
+    assert row and row.status == "rejected" and "replay or fork" in row.reason
+    assert spy.refs == []
